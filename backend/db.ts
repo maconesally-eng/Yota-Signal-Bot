@@ -66,35 +66,9 @@ db.exec(`
     FOREIGN KEY (trade_id) REFERENCES trades(id)
   );
 
-  -- Strategy weights table for self-learning
-  CREATE TABLE IF NOT EXISTS strategy_weights (
-    strategy TEXT PRIMARY KEY,
-    weight REAL DEFAULT 1.0,
-    win_count INTEGER DEFAULT 0,
-    loss_count INTEGER DEFAULT 0,
-    total_pnl REAL DEFAULT 0,
-    avg_win_pnl REAL DEFAULT 0,
-    avg_loss_pnl REAL DEFAULT 0,
-    last_updated INTEGER
-  );
-
-  -- Agent memory sync table
-  CREATE TABLE IF NOT EXISTS agent_memory (
-    id TEXT PRIMARY KEY DEFAULT 'main',
-    level INTEGER DEFAULT 1,
-    current_xp INTEGER DEFAULT 0,
-    next_level_xp INTEGER DEFAULT 100,
-    brain_version TEXT DEFAULT 'v1.0',
-    lessons TEXT DEFAULT '[]',
-    last_synced INTEGER
-  );
-
-  -- Initialize default strategy weights
-  INSERT OR IGNORE INTO strategy_weights (strategy, weight, last_updated) VALUES
-    ('Silver Bullet', 1.0, strftime('%s', 'now') * 1000),
-    ('Order Block', 1.0, strftime('%s', 'now') * 1000),
-    ('Manual', 1.0, strftime('%s', 'now') * 1000);
+  -- Initialize default strategy weights (DEPRECATED - Dynamic now)
 `);
+
 
 // Type definitions for database operations
 export interface DbTrade {
@@ -134,15 +108,16 @@ export interface DbSignal {
   created_at: number;
 }
 
-export interface DbStrategyWeight {
+export interface DbStrategyStats {
   strategy: string;
-  weight: number;
+  trade_count: number;
   win_count: number;
   loss_count: number;
+  breakeven_count: number;
   total_pnl: number;
-  avg_win_pnl: number;
-  avg_loss_pnl: number;
-  last_updated: number;
+  avg_win: number;
+  avg_loss: number;
+  win_rate: number;
 }
 
 export interface DbLearningEvent {
@@ -161,7 +136,16 @@ const insertTrade = db.prepare(`
     leverage, pnl, pnl_percent, outcome, strategy, notes, checklist_grade, source, timestamp, closed_at)
   VALUES (@id, @pair, @direction, @entry_price, @exit_price, @stop_loss, @take_profit,
     @leverage, @pnl, @pnl_percent, @outcome, @strategy, @notes, @checklist_grade, @source, @timestamp, @closed_at)
+  ON CONFLICT(id) DO UPDATE SET
+    pair=excluded.pair,
+    direction=excluded.direction,
+    entry_price=excluded.entry_price,
+    stop_loss=excluded.stop_loss,
+    take_profit=excluded.take_profit,
+    leverage=excluded.leverage,
+    strategy=excluded.strategy
 `);
+
 
 const updateTrade = db.prepare(`
   UPDATE trades SET
@@ -207,22 +191,35 @@ const getRecentSignals = db.prepare(`
   SELECT * FROM signals ORDER BY timestamp DESC LIMIT @limit
 `);
 
-// Prepared statements for strategy weights
-const getStrategyWeight = db.prepare(`SELECT * FROM strategy_weights WHERE strategy = ?`);
-
-const updateStrategyWeight = db.prepare(`
-  UPDATE strategy_weights SET
-    weight = @weight,
-    win_count = @win_count,
-    loss_count = @loss_count,
-    total_pnl = @total_pnl,
-    avg_win_pnl = @avg_win_pnl,
-    avg_loss_pnl = @avg_loss_pnl,
-    last_updated = @last_updated
-  WHERE strategy = @strategy
+// Strategy stats aggregation (Dynamic)
+const getStrategyStats = db.prepare(`
+  SELECT 
+    strategy,
+    COUNT(*) as trade_count,
+    SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as win_count,
+    SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) as loss_count,
+    SUM(CASE WHEN outcome='BREAKEVEN' THEN 1 ELSE 0 END) as breakeven_count,
+    COALESCE(SUM(pnl), 0) as total_pnl,
+    COALESCE(AVG(CASE WHEN outcome='WIN' THEN pnl END), 0) as avg_win,
+    COALESCE(AVG(CASE WHEN outcome='LOSS' THEN pnl END), 0) as avg_loss
+  FROM trades
+  WHERE outcome IN ('WIN', 'LOSS', 'BREAKEVEN')
+  GROUP BY strategy
 `);
 
-const getAllStrategyWeights = db.prepare(`SELECT * FROM strategy_weights`);
+// Calendar stats (Daily PnL) - uses localtime for correct local day grouping
+const getDailyStats = db.prepare(`
+  SELECT 
+    date(timestamp / 1000, 'unixepoch', 'localtime') as date,
+    COUNT(*) as trade_count,
+    SUM(pnl) as total_pnl,
+    SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END) as wins,
+    SUM(CASE WHEN outcome='LOSS' THEN 1 ELSE 0 END) as losses
+  FROM trades
+  WHERE outcome IN ('WIN', 'LOSS', 'BREAKEVEN')
+  GROUP BY date(timestamp / 1000, 'unixepoch', 'localtime')
+  ORDER BY date DESC
+`);
 
 // Prepared statements for learning events
 const insertLearningEvent = db.prepare(`
@@ -292,10 +289,14 @@ export const signalDb = {
 };
 
 export const strategyDb = {
-  get: (strategy: string): DbStrategyWeight | undefined =>
-    getStrategyWeight.get(strategy) as DbStrategyWeight | undefined,
-  update: (weight: DbStrategyWeight) => updateStrategyWeight.run(weight),
-  getAll: (): DbStrategyWeight[] => getAllStrategyWeights.all() as DbStrategyWeight[],
+  getStats: (): DbStrategyStats[] => {
+    const rows = getStrategyStats.all() as any[];
+    return rows.map(row => ({
+      ...row,
+      win_rate: row.trade_count > 0 ? (row.win_count / row.trade_count) * 100 : 0
+    }));
+  },
+  getDaily: () => getDailyStats.all(),
 };
 
 export const learningDb = {

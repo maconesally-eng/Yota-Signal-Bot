@@ -10,7 +10,7 @@ import {
   statsDb,
   DbTrade,
   DbSignal,
-  DbStrategyWeight,
+  DbStrategyStats,
 } from './db.js';
 
 const app = express();
@@ -154,18 +154,30 @@ app.post('/api/webhook/trade', (req: Request, res: Response) => {
       const existingTrade = tradeDb.getById(trade.id);
 
       if (existingTrade) {
+        // Compute PnL if not provided
+        const exitPrice = trade.exitPrice ?? existingTrade.exit_price ?? existingTrade.entry_price;
+        const pnl = trade.pnl ?? (exitPrice - existingTrade.entry_price) * (existingTrade.direction === 'LONG' ? 1 : -1) * (existingTrade.leverage || 1);
+        const pnlPercent = trade.pnlPercent ?? ((pnl / existingTrade.entry_price) * 100);
+
+        // Determine outcome if not provided
+        let outcome = trade.outcome;
+        if (!outcome) {
+          if (pnl > 0) outcome = 'WIN';
+          else if (pnl < 0) outcome = 'LOSS';
+          else outcome = 'BREAKEVEN';
+        }
+
         // Update existing trade
         tradeDb.update({
           id: trade.id,
-          exit_price: trade.exitPrice || null,
-          pnl: trade.pnl || 0,
-          pnl_percent: trade.pnlPercent || 0,
-          outcome: trade.outcome || 'BREAKEVEN',
+          exit_price: exitPrice,
+          pnl,
+          pnl_percent: pnlPercent,
+          outcome,
           closed_at: now,
         });
 
-        // Update strategy weights
-        updateStrategyWeight(existingTrade.strategy || 'Manual', trade.outcome || 'BREAKEVEN', trade.pnl || 0);
+        // Update strategy weights (Removed - dynamic)
 
         const updatedTrade = tradeDb.getById(trade.id);
         broadcast('trade_close', formatTrade(updatedTrade!));
@@ -176,18 +188,30 @@ app.post('/api/webhook/trade', (req: Request, res: Response) => {
 
       } else {
         // Insert as closed trade (for cases where we didn't track the open)
+        // Compute PnL if not provided
+        const exitPrice = trade.exitPrice ?? trade.entryPrice;
+        const pnl = trade.pnl ?? (exitPrice - trade.entryPrice) * (trade.direction === 'LONG' ? 1 : -1) * (trade.leverage || 1);
+        const pnlPercent = trade.pnlPercent ?? ((pnl / trade.entryPrice) * 100);
+
+        let outcome = trade.outcome;
+        if (!outcome) {
+          if (pnl > 0) outcome = 'WIN';
+          else if (pnl < 0) outcome = 'LOSS';
+          else outcome = 'BREAKEVEN';
+        }
+
         const dbTrade: Omit<DbTrade, 'created_at'> = {
           id: trade.id || randomUUID(),
           pair: trade.pair,
           direction: trade.direction,
           entry_price: trade.entryPrice,
-          exit_price: trade.exitPrice || null,
+          exit_price: exitPrice,
           stop_loss: trade.stopLoss || null,
           take_profit: trade.takeProfit || null,
           leverage: trade.leverage || 1,
-          pnl: trade.pnl || 0,
-          pnl_percent: trade.pnlPercent || 0,
-          outcome: trade.outcome || 'BREAKEVEN',
+          pnl,
+          pnl_percent: pnlPercent,
+          outcome,
           strategy: trade.strategy || 'Manual',
           notes: null,
           checklist_grade: null,
@@ -197,7 +221,7 @@ app.post('/api/webhook/trade', (req: Request, res: Response) => {
         };
 
         tradeDb.insert(dbTrade);
-        updateStrategyWeight(dbTrade.strategy || 'Manual', dbTrade.outcome!, dbTrade.pnl);
+        // updateStrategyWeight(dbTrade.strategy || 'Manual', dbTrade.outcome!, dbTrade.pnl);
 
         broadcast('trade_close', formatTrade(dbTrade as DbTrade));
         broadcast('stats_update', formatStats(statsDb.getAll()));
@@ -299,7 +323,7 @@ app.get('/api/trades', (req: Request, res: Response) => {
 
 // Get single trade
 app.get('/api/trades/:id', (req: Request, res: Response) => {
-  const trade = tradeDb.getById(req.params.id);
+  const trade = tradeDb.getById(req.params.id as string);
   if (!trade) {
     return res.status(404).json({ error: 'Trade not found' });
   }
@@ -334,9 +358,8 @@ app.post('/api/trades', (req: Request, res: Response) => {
   try {
     tradeDb.insert(dbTrade);
 
-    // If trade is closed, update strategy weights and analyze
+    // If trade is closed, analyze
     if (dbTrade.outcome && dbTrade.outcome !== 'OPEN') {
-      updateStrategyWeight(dbTrade.strategy || 'Manual', dbTrade.outcome, dbTrade.pnl);
       analyzeTrade(dbTrade as DbTrade);
     }
 
@@ -352,14 +375,14 @@ app.post('/api/trades', (req: Request, res: Response) => {
 
 // Update trade
 app.patch('/api/trades/:id', (req: Request, res: Response) => {
-  const existingTrade = tradeDb.getById(req.params.id);
+  const existingTrade = tradeDb.getById(req.params.id as string);
   if (!existingTrade) {
     return res.status(404).json({ error: 'Trade not found' });
   }
 
   const updates = req.body;
   tradeDb.update({
-    id: req.params.id,
+    id: req.params.id as string,
     exit_price: updates.exitPrice ?? existingTrade.exit_price,
     pnl: updates.pnl ?? existingTrade.pnl,
     pnl_percent: updates.pnlPercent ?? existingTrade.pnl_percent,
@@ -369,7 +392,7 @@ app.patch('/api/trades/:id', (req: Request, res: Response) => {
     closed_at: updates.outcome && updates.outcome !== 'OPEN' ? Date.now() : existingTrade.closed_at,
   });
 
-  const updatedTrade = tradeDb.getById(req.params.id);
+  const updatedTrade = tradeDb.getById(req.params.id as string);
   broadcast('trade_update', formatTrade(updatedTrade!));
   broadcast('stats_update', formatStats(statsDb.getAll()));
 
@@ -386,17 +409,23 @@ app.get('/api/signals', (req: Request, res: Response) => {
 // Get stats
 app.get('/api/stats', (req: Request, res: Response) => {
   const stats = statsDb.getAll();
-  const strategyWeights = strategyDb.getAll();
+  const strategyStats = strategyDb.getStats();
   res.json({
     stats: formatStats(stats),
-    strategyWeights: strategyWeights,
+    strategyWeights: strategyStats.map(formatStrategyStats),
   });
 });
 
-// Get strategy weights
+// Get strategy stats
 app.get('/api/strategies', (req: Request, res: Response) => {
-  const weights = strategyDb.getAll();
-  res.json({ strategies: weights });
+  const stats = strategyDb.getStats();
+  res.json({ strategies: stats.map(formatStrategyStats) });
+});
+
+// Get calendar (daily) stats
+app.get('/api/calendar', (req: Request, res: Response) => {
+  const daily = strategyDb.getDaily();
+  res.json({ calendar: daily });
 });
 
 // Get learning events
@@ -574,58 +603,25 @@ function formatStats(stats: {
   };
 }
 
-function updateStrategyWeight(strategy: string, outcome: 'WIN' | 'LOSS' | 'BREAKEVEN', pnl: number) {
-  const current = strategyDb.get(strategy);
+function formatStrategyStats(stats: DbStrategyStats) {
+  // Calculate weight dynamically to match frontend expectation
+  const winValue = stats.win_count * Math.abs(stats.avg_win);
+  const lossValue = stats.loss_count * Math.abs(stats.avg_loss) + 1;
+  const weight = Math.max(0.1, Math.min(5.0, winValue / lossValue));
 
-  if (!current) {
-    // Create new strategy entry
-    strategyDb.update({
-      strategy,
-      weight: 1.0,
-      win_count: outcome === 'WIN' ? 1 : 0,
-      loss_count: outcome === 'LOSS' ? 1 : 0,
-      total_pnl: pnl,
-      avg_win_pnl: outcome === 'WIN' ? pnl : 0,
-      avg_loss_pnl: outcome === 'LOSS' ? pnl : 0,
-      last_updated: Date.now(),
-    });
-    return;
-  }
-
-  const newWins = current.win_count + (outcome === 'WIN' ? 1 : 0);
-  const newLosses = current.loss_count + (outcome === 'LOSS' ? 1 : 0);
-  const newTotalPnl = current.total_pnl + pnl;
-
-  // Calculate new averages
-  let newAvgWin = current.avg_win_pnl;
-  let newAvgLoss = current.avg_loss_pnl;
-
-  if (outcome === 'WIN') {
-    newAvgWin = newWins > 0
-      ? (current.avg_win_pnl * current.win_count + pnl) / newWins
-      : pnl;
-  } else if (outcome === 'LOSS') {
-    newAvgLoss = newLosses > 0
-      ? (current.avg_loss_pnl * current.loss_count + pnl) / newLosses
-      : pnl;
-  }
-
-  // Calculate weight using formula: weight = (wins * avgWinPnl) / (losses * avgLossPnl + 1)
-  const winValue = newWins * Math.abs(newAvgWin);
-  const lossValue = newLosses * Math.abs(newAvgLoss) + 1; // +1 to prevent division by zero
-  const newWeight = Math.max(0.1, Math.min(5.0, winValue / lossValue));
-
-  strategyDb.update({
-    strategy,
-    weight: newWeight,
-    win_count: newWins,
-    loss_count: newLosses,
-    total_pnl: newTotalPnl,
-    avg_win_pnl: newAvgWin,
-    avg_loss_pnl: newAvgLoss,
-    last_updated: Date.now(),
-  });
+  return {
+    strategy: stats.strategy,
+    weight: Number(weight.toFixed(2)),
+    winCount: stats.win_count,
+    lossCount: stats.loss_count,
+    totalPnl: stats.total_pnl,
+    avgWinPnl: stats.avg_win,
+    avgLossPnl: stats.avg_loss,
+    lastUpdated: Date.now(), // Dynamic, so always fresh
+  };
 }
+
+// function updateStrategyWeight removed (Dynamic calculation)
 
 function analyzeTrade(trade: DbTrade) {
   const patterns: string[] = [];
@@ -668,27 +664,36 @@ function analyzeTrade(trade: DbTrade) {
   }
 
   // Pattern 3: Strategy performance
-  const strategyWeight = strategyDb.get(trade.strategy || 'Manual');
-  if (strategyWeight && strategyWeight.weight > 2.0) {
-    learningDb.insert({
-      id: randomUUID(),
-      trade_id: trade.id,
-      lesson: `${trade.strategy} strategy performing well (weight: ${strategyWeight.weight.toFixed(2)}). Prioritize this setup.`,
-      pattern_type: 'STRATEGY_PERFORMANCE',
-      trend_context: null,
-      market_context: null,
-      timestamp: now,
-    });
-  } else if (strategyWeight && strategyWeight.weight < 0.5) {
-    learningDb.insert({
-      id: randomUUID(),
-      trade_id: trade.id,
-      lesson: `${trade.strategy} strategy underperforming (weight: ${strategyWeight.weight.toFixed(2)}). Review and adjust.`,
-      pattern_type: 'STRATEGY_PERFORMANCE',
-      trend_context: null,
-      market_context: null,
-      timestamp: now,
-    });
+  const allStrategies = strategyDb.getStats();
+  const stratStats = allStrategies.find(s => s.strategy === (trade.strategy || 'Manual'));
+
+  if (stratStats) {
+    // Calculate implied weight/profit factor
+    const winValue = stratStats.win_count * Math.abs(stratStats.avg_win);
+    const lossValue = stratStats.loss_count * Math.abs(stratStats.avg_loss) + 1;
+    const profitFactor = winValue / lossValue;
+
+    if (profitFactor > 2.0) {
+      learningDb.insert({
+        id: randomUUID(),
+        trade_id: trade.id,
+        lesson: `${trade.strategy} strategy performing well (PF: ${profitFactor.toFixed(2)}). Prioritize this setup.`,
+        pattern_type: 'STRATEGY_PERFORMANCE',
+        trend_context: null,
+        market_context: null,
+        timestamp: now,
+      });
+    } else if (profitFactor < 0.5) {
+      learningDb.insert({
+        id: randomUUID(),
+        trade_id: trade.id,
+        lesson: `${trade.strategy} strategy underperforming (PF: ${profitFactor.toFixed(2)}). Review and adjust.`,
+        pattern_type: 'STRATEGY_PERFORMANCE',
+        trend_context: null,
+        market_context: null,
+        timestamp: now,
+      });
+    }
   }
 
   // Broadcast learning update

@@ -18,16 +18,16 @@ export interface DayStats {
 export const getCalendarData = (currentDate: Date, trades: Trade[]) => {
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
-  
+
   // First day of the month
   const firstDay = new Date(year, month, 1);
   // Last day of the month
   const lastDay = new Date(year, month + 1, 0);
-  
+
   // Start date for the grid (Sunday before first day of month)
   const startDate = new Date(firstDay);
   startDate.setDate(startDate.getDate() - startDate.getDay());
-  
+
   // End date for the grid (Saturday after last day of month)
   const endDate = new Date(lastDay);
   if (lastDay.getDay() !== 6) {
@@ -36,12 +36,24 @@ export const getCalendarData = (currentDate: Date, trades: Trade[]) => {
 
   const days: DayStats[] = [];
   const iterDate = new Date(startDate);
-  const todayStr = new Date().toISOString().split('T')[0];
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 
   while (iterDate <= endDate) {
-    const dateStr = iterDate.toISOString().split('T')[0];
-    const dayTrades = trades.filter(t => t.date === dateStr);
-    
+    // Use local date string for grouping (YYYY-MM-DD in local timezone)
+    const iterYear = iterDate.getFullYear();
+    const iterMonth = String(iterDate.getMonth() + 1).padStart(2, '0');
+    const iterDay = String(iterDate.getDate()).padStart(2, '0');
+    const dateStr = `${iterYear}-${iterMonth}-${iterDay}`;
+
+    // Filter trades by matching local date
+    const dayTrades = trades.filter(t => {
+      // t.date is from backend, should be in YYYY-MM-DD format
+      // But we need to handle both ISO strings and date-only strings
+      const tradeDate = t.date.split('T')[0]; // Handle ISO format
+      return tradeDate === dateStr;
+    });
+
     // Calculate Stats
     let totalPnl = 0;
     let wins = 0;
@@ -98,7 +110,7 @@ export const getCalendarData = (currentDate: Date, trades: Trade[]) => {
 
 export const getIntensityColor = (pnl: number): string => {
   const absPnl = Math.abs(pnl);
-  
+
   if (pnl > 0) {
     // Green Scale
     if (absPnl < 100) return 'rgba(34, 197, 94, 0.1)';
