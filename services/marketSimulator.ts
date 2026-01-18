@@ -1,181 +1,288 @@
 import { Candle, LiveTrade, SignalDirection } from '../types';
+import { tradeService } from './tradeService';
 
-// Configuration for the simulation speed/volatility
-const CONFIG = {
-  TICK_RATE: 200, // Update every 200ms
-  CANDLE_PERIOD: 2000, // New candle every 2 seconds (Fast trading)
-  VOLATILITY: 0.15,
-  START_PRICE: 144.50
-};
+// Connection status for live price feed
+type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 
 type Listener = () => void;
 
 class MarketSimulator {
   private candles: Candle[] = [];
-  private currentPrice: number = CONFIG.START_PRICE;
+  private currentPrice: number = 0;
   private listeners: Listener[] = [];
   private activeTrade: LiveTrade | null = null;
-  private intervalId: any = null;
-  
-  // Stats
+  private ws: WebSocket | null = null;
+  private reconnectTimeout: number | null = null;
+  private connectionStatus: ConnectionStatus = 'connecting';
+  private lastUpdateTime: number = 0;
+  private pair: string = 'SOL-PERP';
+
+  // Stats - Initialized from DB
   public stats = {
-    totalTrades: 124,
-    wins: 84,
-    losses: 40,
-    pnl: 3250
+    totalTrades: 0,
+    wins: 0,
+    losses: 0,
+    pnl: 0
   };
 
+  private isInitialized = false;
+
   constructor() {
-    this.generateInitialHistory();
-    this.startLoop();
+    this.connectWebSocket();
+    this.startWatchdog();
   }
 
-  private generateInitialHistory() {
-    let price = CONFIG.START_PRICE;
-    const now = Date.now();
-    for (let i = 0; i < 50; i++) {
-      const open = price;
-      const close = price + (Math.random() - 0.5) * 0.4;
-      const high = Math.max(open, close) + Math.random() * 0.1;
-      const low = Math.min(open, close) - Math.random() * 0.1;
-      
-      this.candles.push({
-        time: new Date(now - (50 - i) * 1000).toLocaleTimeString([], {minute:'2-digit', second:'2-digit'}),
-        open, high, low, close,
-        volume: Math.floor(Math.random() * 1000)
-      });
-      price = close;
-    }
-    this.currentPrice = price;
-  }
+  // Initialize stats from backend
+  public async initialize() {
+    if (this.isInitialized) return;
 
-  private startLoop() {
-    let lastCandleTime = Date.now();
-    
-    this.intervalId = setInterval(() => {
-      const now = Date.now();
-      
-      // 1. Move Price (Random Walk with momentum)
-      const change = (Math.random() - 0.5) * CONFIG.VOLATILITY;
-      this.currentPrice += change;
-
-      // 2. Manage Candle
-      const lastCandleIndex = this.candles.length - 1;
-      const lastCandle = this.candles[lastCandleIndex];
-      
-      // If time to close candle
-      if (now - lastCandleTime > CONFIG.CANDLE_PERIOD) {
-        lastCandleTime = now;
-        this.candles.push({
-          time: new Date(now).toLocaleTimeString([], {minute:'2-digit', second:'2-digit'}),
-          open: this.currentPrice,
-          high: this.currentPrice,
-          low: this.currentPrice,
-          close: this.currentPrice,
-          volume: 0
-        });
-        if (this.candles.length > 60) this.candles.shift(); // Keep array small
-      } else {
-        // Update current candle IMMUTABLY (Replace object instead of mutating property)
-        // This prevents "Cannot assign to read only property" errors
-        this.candles[lastCandleIndex] = {
-            ...lastCandle,
-            close: this.currentPrice,
-            high: Math.max(lastCandle.high, this.currentPrice),
-            low: Math.min(lastCandle.low, this.currentPrice),
-            volume: lastCandle.volume + Math.random() * 10
-        };
-      }
-
-      // 3. Trade Logic (Auto-Trade)
-      this.processTrades();
-
-      // 4. Notify UI
+    try {
+      const { stats } = await tradeService.fetchStats();
+      this.stats = {
+        totalTrades: stats.totalTrades,
+        wins: stats.wins,
+        losses: stats.losses,
+        pnl: stats.totalPnl
+      };
+      this.isInitialized = true;
       this.notify();
-    }, CONFIG.TICK_RATE);
+    } catch (error) {
+      console.error("MarketSimulator: Failed to initialize stats", error);
+    }
   }
 
-  private processTrades() {
-    // If no trade, maybe open one?
-    if (!this.activeTrade) {
-      // Simple random entry logic for demo visual
-      if (Math.random() > 0.95) { 
-        const direction: SignalDirection = Math.random() > 0.5 ? 'LONG' : 'SHORT';
-        const tpDist = 1.5;
-        const slDist = 0.8;
-        
-        this.activeTrade = {
-          id: Date.now().toString(),
-          pair: 'SOL-PERP',
-          direction,
-          entryPrice: this.currentPrice,
-          takeProfit: direction === 'LONG' ? this.currentPrice + tpDist : this.currentPrice - tpDist,
-          stopLoss: direction === 'LONG' ? this.currentPrice - slDist : this.currentPrice + slDist,
-          status: 'OPEN',
-          pnl: 0,
-          entryTime: Date.now()
-        };
-      }
-    } else {
-      // Manage existing trade immutably
-      const t = this.activeTrade;
-      const diff = this.currentPrice - t.entryPrice;
-      const newPnl = t.direction === 'LONG' ? diff : -diff;
+  // Connect to Binance Futures WebSocket
+  private connectWebSocket() {
+    if (this.ws) {
+      this.ws.close();
+    }
 
-      // Update active trade with new PNL (create new object)
-      this.activeTrade = { ...t, pnl: newPnl };
+    this.connectionStatus = 'connecting';
+    const symbol = 'solusdt'; // SOL-PERP -> solusdt
 
-      // Check Exit
-      let closed = false;
-      let outcome: 'WIN' | 'LOSS' | null = null;
-      const currentTrade = this.activeTrade;
+    try {
+      this.ws = new WebSocket(`wss://fstream.binance.com/stream?streams=${symbol}@aggTrade/${symbol}@kline_1s`);
 
-      if (currentTrade.direction === 'LONG') {
-        if (this.currentPrice >= currentTrade.takeProfit) { closed = true; outcome = 'WIN'; }
-        if (this.currentPrice <= currentTrade.stopLoss) { closed = true; outcome = 'LOSS'; }
-      } else {
-        if (this.currentPrice <= currentTrade.takeProfit) { closed = true; outcome = 'WIN'; }
-        if (this.currentPrice >= currentTrade.stopLoss) { closed = true; outcome = 'LOSS'; }
-      }
+      this.ws.onopen = () => {
+        console.log('MarketSimulator: WebSocket connected to Binance');
+        this.connectionStatus = 'connected';
+        this.notify();
+      };
 
-      if (closed) {
-        // Update stats IMMUTABLY
-        this.stats = {
-            ...this.stats,
-            totalTrades: this.stats.totalTrades + 1
-        };
+      this.ws.onmessage = (event) => {
+        this.lastUpdateTime = Date.now();
+        const msg = JSON.parse(event.data);
 
-        if (outcome === 'WIN') {
-          this.stats = {
-              ...this.stats,
-              wins: this.stats.wins + 1,
-              pnl: this.stats.pnl + Math.abs(currentTrade.pnl) * 100
-          };
-        } else {
-          this.stats = {
-              ...this.stats,
-              losses: this.stats.losses + 1,
-              pnl: this.stats.pnl - Math.abs(currentTrade.pnl) * 100
-          };
+        if (msg.stream?.endsWith('@aggTrade')) {
+          // Live price update
+          const price = parseFloat(msg.data.p);
+          this.currentPrice = price;
+          this.updateActiveTradePnL();
+          this.notify();
+        } else if (msg.stream?.endsWith('@kline_1s')) {
+          // Candle update
+          const k = msg.data.k;
+          this.updateCandle({
+            time: new Date(k.t).toLocaleTimeString([], { minute: '2-digit', second: '2-digit' }),
+            open: parseFloat(k.o),
+            high: parseFloat(k.h),
+            low: parseFloat(k.l),
+            close: parseFloat(k.c),
+            volume: parseFloat(k.v)
+          }, k.x); // k.x = is candle closed
         }
-        this.activeTrade = null; // Close it
+      };
+
+      this.ws.onerror = (error) => {
+        console.error('MarketSimulator: WebSocket error', error);
+        this.handleReconnect();
+      };
+
+      this.ws.onclose = () => {
+        console.log('MarketSimulator: WebSocket closed');
+        this.handleReconnect();
+      };
+    } catch (error) {
+      console.error('MarketSimulator: Failed to create WebSocket', error);
+      this.connectionStatus = 'disconnected';
+      this.handleReconnect();
+    }
+  }
+
+  private handleReconnect() {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+    }
+
+    this.connectionStatus = 'reconnecting';
+    this.notify();
+
+    // Clear active trade on disconnect - no simulated trading
+    if (this.activeTrade) {
+      console.warn('MarketSimulator: Closing active trade due to disconnect');
+      this.activeTrade = null;
+    }
+
+    this.reconnectTimeout = window.setTimeout(() => {
+      console.log('MarketSimulator: Attempting reconnect...');
+      this.connectWebSocket();
+    }, 3000);
+  }
+
+  // Watchdog to detect stale data
+  private startWatchdog() {
+    setInterval(() => {
+      if (this.connectionStatus === 'connected' && Date.now() - this.lastUpdateTime > 5000) {
+        console.warn('MarketSimulator: Data stale, reconnecting...');
+        this.handleReconnect();
       }
+    }, 2000);
+  }
+
+  // Update candle data
+  private updateCandle(candle: Candle, isClosed: boolean) {
+    if (this.candles.length === 0 || isClosed) {
+      // New candle
+      this.candles.push(candle);
+      if (this.candles.length > 60) this.candles.shift();
+    } else {
+      // Update current candle
+      this.candles[this.candles.length - 1] = candle;
+    }
+  }
+
+  // Update PnL for active trade based on current price
+  private updateActiveTradePnL() {
+    if (!this.activeTrade || this.connectionStatus !== 'connected') return;
+
+    const t = this.activeTrade;
+    const diff = this.currentPrice - t.entryPrice;
+    const newPnl = t.direction === 'LONG' ? diff : -diff;
+
+    this.activeTrade = { ...t, pnl: newPnl };
+
+    // Check exit conditions
+    this.checkTradeExit();
+  }
+
+  // Check if trade should be closed
+  private async checkTradeExit() {
+    if (!this.activeTrade || this.connectionStatus !== 'connected') return;
+
+    const t = this.activeTrade;
+    let closed = false;
+    let outcome: 'WIN' | 'LOSS' | null = null;
+
+    if (t.direction === 'LONG') {
+      if (this.currentPrice >= t.takeProfit) { closed = true; outcome = 'WIN'; }
+      if (this.currentPrice <= t.stopLoss) { closed = true; outcome = 'LOSS'; }
+    } else {
+      if (this.currentPrice <= t.takeProfit) { closed = true; outcome = 'WIN'; }
+      if (this.currentPrice >= t.stopLoss) { closed = true; outcome = 'LOSS'; }
+    }
+
+    if (closed && outcome) {
+      const finalPnl = outcome === 'WIN'
+        ? Math.abs(t.takeProfit - t.entryPrice)
+        : -Math.abs(t.stopLoss - t.entryPrice);
+
+      // Close locally
+      this.activeTrade = null;
+
+      // Submit Close to Backend DB
+      try {
+        await tradeService.updateTrade(t.id, {
+          exitPrice: this.currentPrice,
+          outcome: outcome,
+          pnl: parseFloat((finalPnl * 100).toFixed(2)),
+          pnlPercent: parseFloat((Math.abs(finalPnl / t.entryPrice) * 100 * 5).toFixed(2))
+        });
+
+        // Re-fetch stats
+        const { stats } = await tradeService.fetchStats();
+        this.stats = {
+          totalTrades: stats.totalTrades,
+          wins: stats.wins,
+          losses: stats.losses,
+          pnl: stats.totalPnl
+        };
+      } catch (e) {
+        console.error("Failed to update closed trade in DB", e);
+      }
+    }
+  }
+
+  // Manual trade entry (called from UI or signal)
+  public async openTrade(direction: SignalDirection, stopLoss: number, takeProfit: number) {
+    // HALT if not connected - no trading without live data
+    if (this.connectionStatus !== 'connected' || this.currentPrice === 0) {
+      console.error('MarketSimulator: Cannot open trade - not connected to live data');
+      return null;
+    }
+
+    if (this.activeTrade) {
+      console.warn('MarketSimulator: Already have an active trade');
+      return null;
+    }
+
+    const localId = Date.now().toString();
+    this.activeTrade = {
+      id: localId,
+      pair: this.pair,
+      direction,
+      entryPrice: this.currentPrice,
+      takeProfit,
+      stopLoss,
+      status: 'OPEN',
+      pnl: 0,
+      entryTime: Date.now()
+    };
+
+    // Submit to Backend DB
+    try {
+      const dbTrade = await tradeService.submitTrade({
+        pair: this.pair,
+        direction,
+        entryPrice: this.currentPrice,
+        stopLoss,
+        takeProfit,
+        leverage: 5,
+        strategy: 'Silver Bullet',
+        outcome: 'OPEN'
+      });
+
+      if (dbTrade && this.activeTrade?.id === localId) {
+        this.activeTrade = { ...this.activeTrade, id: dbTrade.id };
+      }
+
+      return this.activeTrade;
+    } catch (e) {
+      console.error("Failed to submit trade to DB", e);
+      this.activeTrade = null;
+      return null;
     }
   }
 
   // API
   public getData() {
     return {
-      // Return a deep copy of candles to prevent React from freezing the simulator's internal state
-      candles: this.candles.map(c => ({...c})),
+      candles: this.candles.map(c => ({ ...c })),
       currentPrice: this.currentPrice,
-      activeTrade: this.activeTrade ? {...this.activeTrade} : null,
-      stats: {...this.stats}
+      activeTrade: this.activeTrade ? { ...this.activeTrade } : null,
+      stats: { ...this.stats },
+      connectionStatus: this.connectionStatus
     };
+  }
+
+  public getConnectionStatus(): ConnectionStatus {
+    return this.connectionStatus;
   }
 
   public subscribe(listener: Listener) {
     this.listeners.push(listener);
+    if (!this.isInitialized) {
+      this.initialize();
+    }
     return () => {
       this.listeners = this.listeners.filter(l => l !== listener);
     };
