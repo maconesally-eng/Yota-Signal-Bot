@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Yota Signal Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              navy: {
+                900: '#0a0f1a', // Secondary BG
+                800: '#0d1421', // Primary BG
+                700: '#111827', // Card BG
+              },
+              accent: {
+                primary: '#8b5cf6',
+                secondary: '#a855f7',
+                glow: 'rgba(139, 92, 246, 0.3)',
+              },
+              success: '#22c55e',
+              danger: '#ef4444',
+              warning: '#f59e0b',
+              border: '#1e293b',
+              text: {
+                primary: '#ffffff',
+                secondary: '#94a3b8',
+                muted: '#64748b',
+              }
+            },
+            fontFamily: {
+              sans: ['Inter', 'system-ui', 'sans-serif'],
+              mono: ['JetBrains Mono', 'monospace'],
+            },
+            animation: {
+              'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              'float': 'float 6s ease-in-out infinite',
+              'shimmer': 'shimmer 2s linear infinite',
+              'pulse-fast': 'pulse 1.5s ease-in-out infinite',
+              'fade-in-up': 'fadeInUp 0.8s ease-out forwards',
+            },
+            keyframes: {
+              float: {
+                '0%, 100%': { transform: 'translateY(0)' },
+                '50%': { transform: 'translateY(-20px)' },
+              },
+              shimmer: {
+                '0%': { backgroundPosition: '-1000px 0' },
+                '100%': { backgroundPosition: '1000px 0' },
+              },
+              priceFlashGreen: {
+                '0%': { backgroundColor: 'rgba(34, 197, 94, 0.3)' },
+                '100%': { backgroundColor: 'transparent' },
+              },
+              priceFlashRed: {
+                '0%': { backgroundColor: 'rgba(239, 68, 68, 0.3)' },
+                '100%': { backgroundColor: 'transparent' },
+              },
+              fadeInUp: {
+                '0%': { opacity: '0', transform: 'translateY(40px)' },
+                '100%': { opacity: '1', transform: 'translateY(0)' },
+              }
+            }
+          },
+        },
+      }
+    </script>
+    <style>
+      body {
+        background-color: #0a0f1a;
+        color: #ffffff;
+        -webkit-tap-highlight-color: transparent;
+      }
+      /* Star Animation */
+      .star {
+        position: absolute;
+        background: white;
+        border-radius: 50%;
+        opacity: 0;
+        animation: twinkle var(--duration) ease-in-out infinite;
+        animation-delay: var(--delay);
+      }
+      @keyframes twinkle {
+        0% { opacity: 0; transform: translateY(0) scale(0.5); }
+        50% { opacity: var(--opacity); transform: translateY(-10px) scale(1); }
+        100% { opacity: 0; transform: translateY(-20px) scale(0.5); }
+      }
+      .animate-price-green {
+        animation: priceFlashGreen 200ms ease-out;
+      }
+      .animate-price-red {
+        animation: priceFlashRed 200ms ease-out;
+      }
+      
+      /* Scroll Reveal Classes */
+      .reveal-section {
+        opacity: 0;
+        transform: translateY(60px);
+        transition: opacity 0.8s ease-out, transform 0.8s ease-out;
+      }
+      .reveal-section.visible {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      /* Glow Orbs */
+      .glow-orb {
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(80px);
+        opacity: 0.4;
+        animation: float 10s ease-in-out infinite;
+        z-index: 0;
+      }
+
+      /* Scrollbar */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #0d1421; 
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #1e293b; 
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #8b5cf6; 
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
+    "react-router-dom": "https://esm.sh/react-router-dom@^7.12.0",
+    "@google/genai": "https://esm.sh/@google/genai@^1.37.0",
+    "recharts": "https://esm.sh/recharts@^3.6.0",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>

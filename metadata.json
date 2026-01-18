@@ -1,0 +1,7 @@
+{
+  "name": "Copy of Yota Signal Tracker",
+  "description": "Professional crypto perpetuals signal dashboard for Jupiter Perps on Solana with AI-powered analytics.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
