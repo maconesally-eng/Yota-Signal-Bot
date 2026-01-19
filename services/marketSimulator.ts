@@ -66,6 +66,18 @@ class MarketSimulator {
       this.ws.onopen = () => {
         console.log('MarketSimulator: WebSocket connected to Binance');
         this.connectionStatus = 'connected';
+        // Seed an initial placeholder candle so UI doesn't show empty
+        if (this.candles.length === 0) {
+          const now = Date.now();
+          this.candles.push({
+            time: new Date(now).toLocaleTimeString([], { minute: '2-digit', second: '2-digit' }),
+            open: 0,
+            high: 0,
+            low: 0,
+            close: 0,
+            volume: 0
+          });
+        }
         this.notify();
       };
 
@@ -80,16 +92,24 @@ class MarketSimulator {
           this.updateActiveTradePnL();
           this.notify();
         } else if (msg.stream?.endsWith('@kline_1s')) {
-          // Candle update
+          // Candle update from 1-second kline stream
           const k = msg.data.k;
-          this.updateCandle({
+          const candle: Candle = {
             time: new Date(k.t).toLocaleTimeString([], { minute: '2-digit', second: '2-digit' }),
             open: parseFloat(k.o),
             high: parseFloat(k.h),
             low: parseFloat(k.l),
             close: parseFloat(k.c),
             volume: parseFloat(k.v)
-          }, k.x); // k.x = is candle closed
+          };
+
+          // Always update current price from kline close
+          if (this.currentPrice === 0) {
+            this.currentPrice = candle.close;
+          }
+
+          this.updateCandle(candle, k.x); // k.x = is candle closed
+          this.notify();
         }
       };
 
@@ -141,13 +161,23 @@ class MarketSimulator {
 
   // Update candle data
   private updateCandle(candle: Candle, isClosed: boolean) {
-    if (this.candles.length === 0 || isClosed) {
-      // New candle
+    // If this is the first real candle, replace the placeholder
+    if (this.candles.length === 1 && this.candles[0].open === 0) {
+      this.candles[0] = candle;
+      return;
+    }
+
+    if (isClosed) {
+      // Push new candle when current one closes
       this.candles.push(candle);
       if (this.candles.length > 60) this.candles.shift();
     } else {
-      // Update current candle
-      this.candles[this.candles.length - 1] = candle;
+      // Update current (last) candle in place
+      if (this.candles.length > 0) {
+        this.candles[this.candles.length - 1] = candle;
+      } else {
+        this.candles.push(candle);
+      }
     }
   }
 
@@ -291,7 +321,42 @@ class MarketSimulator {
   private notify() {
     this.listeners.forEach(l => l());
   }
+
+  // =========================================================================
+  // Price Feed API (for LivePriceButton and other consumers)
+  // =========================================================================
+
+  /** Get the latest price (0 if not connected) */
+  public getLatestPrice(): number {
+    return this.currentPrice;
+  }
+
+  /** Get the last update timestamp */
+  public getLastUpdateTime(): number {
+    return this.lastUpdateTime;
+  }
+
+  /** Subscribe to price changes only (returns unsubscribe function) */
+  public subscribePrice(callback: (price: number, status: ConnectionStatus) => void): () => void {
+    const listener = () => {
+      callback(this.currentPrice, this.connectionStatus);
+    };
+    this.listeners.push(listener);
+    // Immediately call with current state
+    callback(this.currentPrice, this.connectionStatus);
+    return () => {
+      this.listeners = this.listeners.filter(l => l !== listener);
+    };
+  }
+
+  /** Get current pair symbol */
+  public getPair(): string {
+    return this.pair;
+  }
 }
 
 // Singleton
 export const marketSimulator = new MarketSimulator();
+
+// Re-export types for consumers
+export type { ConnectionStatus };

@@ -1,6 +1,14 @@
 import { GoogleGenAI } from "@google/genai";
 import { AgentLesson } from '../types';
 
+// ============================================================================
+// MOCK MODE: When API key is not set, we use hardcoded insights/news.
+// This is safe because Gemini is ONLY used for:
+// 1. Market news aggregation (non-critical, cosmetic)
+// 2. AI-generated insights (educational, not trading logic)
+// Trading decisions are NOT affected by mock mode.
+// ============================================================================
+
 // Mock Data Constants for Fallback
 const MOCK_NEWS: { headline: string, sentiment: 'Bullish' | 'Bearish' | 'Neutral', source: string }[] = [
   { headline: "Solana Transaction Volume Spikes 20%", sentiment: "Bullish", source: "CoinDesk" },
@@ -10,30 +18,43 @@ const MOCK_NEWS: { headline: string, sentiment: 'Bullish' | 'Bearish' | 'Neutral
 ];
 
 const MOCK_INSIGHTS = [
-  "I am refining my order block identification based on the recent volatility.",
-  "Detected a liquidity sweep; adjusting entry buffer by 0.2%.",
-  "Market structure shift confirmed; switching focus to 5m timeframe.",
-  "Volume divergence noted on the hourly; caution advised for long entries.",
-  "Optimizing strategy parameters based on live data flow.",
-  "Volatility spike detected; widening stop-loss parameters slightly."
+  "[MOCK] I am refining my order block identification based on the recent volatility.",
+  "[MOCK] Detected a liquidity sweep; adjusting entry buffer by 0.2%.",
+  "[MOCK] Market structure shift confirmed; switching focus to 5m timeframe.",
+  "[MOCK] Volume divergence noted on the hourly; caution advised for long entries.",
+  "[MOCK] Optimizing strategy parameters based on live data flow.",
+  "[MOCK] Volatility spike detected; widening stop-loss parameters slightly."
 ];
 
-const MOCK_ANALYSIS = "Analysis: Stop loss was likely too tight given the volatility. Price swept the liquidity pool just below your stop before reversing. Consider widening SL to below the swing low.";
+const MOCK_ANALYSIS = "[MOCK] Analysis: Stop loss was likely too tight given the volatility. Price swept the liquidity pool just below your stop before reversing. Consider widening SL to below the swing low.";
+
+// Track mock mode state
+let isMockMode = false;
 
 // Initialize Gemini Client
 const getClient = () => {
-  const apiKey = process.env.API_KEY;
+  // Vite uses import.meta.env, not process.env
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
   if (!apiKey) {
-    console.warn("API Key not found. Running in Mock Mode.");
+    if (!isMockMode) {
+      console.warn("Gemini API Key not found (VITE_GEMINI_API_KEY). AI insights will use mock data. This is safe - trading logic is unaffected.");
+      isMockMode = true;
+    }
     return null;
   }
   return new GoogleGenAI({ apiKey });
 };
 
+// Export mock mode status for UI
+export const isGeminiMockMode = (): boolean => {
+  getClient(); // Trigger check
+  return isMockMode;
+};
+
 export const fetchMarketNewsAnalysis = async (query: string): Promise<{ headline: string, sentiment: 'Bullish' | 'Bearish' | 'Neutral', source: string }[]> => {
   const client = getClient();
   if (!client) {
-    return MOCK_NEWS;
+    return MOCK_NEWS.map(n => ({ ...n, headline: `[MOCK] ${n.headline}` }));
   }
 
   try {
@@ -77,11 +98,11 @@ export const analyzeTradeFailure = async (tradeDetails: string): Promise<string>
 
 // Updated function signature to accept memory
 export const generateAgentInsight = async (
-  trend: 'UP' | 'DOWN' | 'CHOPPY', 
+  trend: 'UP' | 'DOWN' | 'CHOPPY',
   pastLessons: AgentLesson[]
 ): Promise<string> => {
   const client = getClient();
-  
+
   // Format past lessons for the prompt
   const recentLessons = pastLessons.slice(-5).map(l => `- ${l.insight}`).join('\n');
 
